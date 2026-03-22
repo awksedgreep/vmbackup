@@ -31,10 +31,11 @@ ntfy() {
 
 notify() {
     [ -n "$RESEND_API_KEY" ] || return 0
-    [ -n "$DOMAIN" ] || return 0
+    [ -n "$ALERT_EMAIL_FROM" ] || return 0
+    [ -n "$ALERT_EMAIL_TO" ] || return 0
     curl -fsS -H "Authorization: Bearer $RESEND_API_KEY" \
         -H "Content-Type: application/json" \
-        -d "{\"to\":\"admin@$DOMAIN\",\"subject\":\"VM Backup\",\"text\":\"$1\"}" \
+        -d "{\"from\":\"$ALERT_EMAIL_FROM\",\"to\":[\"$ALERT_EMAIL_TO\"],\"subject\":\"VM Backup\",\"text\":\"$1\"}" \
         https://api.resend.com/emails >/dev/null || true
 }
 
