@@ -42,11 +42,34 @@ fetch_remote_file() {
     remote_ssh_cmd "$REMOTE_USER@$REMOTE_HOST" "cat '$remote_file'" >"$local_file"
 }
 
+NO_LINK=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --nolink)
+            NO_LINK=1
+            shift
+            ;;
+        --help|-h)
+            echo "Usage: $0 [--nolink] <VM_NAME> [NEW_VM_NAME]"
+            exit 0
+            ;;
+        --*)
+            echo "Unknown option: $1"
+            echo "Usage: $0 [--nolink] <VM_NAME> [NEW_VM_NAME]"
+            exit 1
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
 VM_NAME=${1:-""}
 NEW_VM_NAME=${2:-$VM_NAME}
 
 if [ -z "$VM_NAME" ]; then
-    echo "Usage: $0 <VM_NAME> [NEW_VM_NAME]"
+    echo "Usage: $0 [--nolink] <VM_NAME> [NEW_VM_NAME]"
     exit 1
 fi
 
@@ -130,6 +153,10 @@ NEW_VM_NAME_ESCAPED=$(escape_sed "$NEW_VM_NAME")
 sed -i.bak "0,/<name>${OLD_VM_NAME_ESCAPED}<\/name>/s//<name>${NEW_VM_NAME_ESCAPED}<\/name>/" "$TMP_XML"
 sed -i.bak '/<uuid>/d' "$TMP_XML"
 sed -i.bak "/<mac address=/d" "$TMP_XML"
+if [ "$NO_LINK" -eq 1 ]; then
+    perl -0pi -e "s#<interface\\b(.*?)</interface>#my \$block = \$&; \$block =~ s#<link\\s+state=(['\"])up\\1\\s*/>#<link state='down'/>#g; if (\$block !~ /<link\\s+state=/) { \$block =~ s#(<source\\b[^>]*/>)#\$1\\n      <link state='down'/>#; } \$block#gse" "$TMP_XML"
+    log "Interfaces will be restored with link state down"
+fi
 rm -f "$TMP_XML.bak"
 
 while IFS='|' read -r target source_path overlay_path backup_name; do
