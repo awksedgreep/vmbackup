@@ -28,6 +28,20 @@ escape_sed() {
     printf '%s' "$1" | sed 's/[\/&]/\\&/g'
 }
 
+remote_ssh_cmd() {
+    if [ -n "$RSYNC_SSH_KEY" ] && [ -f "$RSYNC_SSH_KEY" ]; then
+        ssh -i "$RSYNC_SSH_KEY" "$@"
+    else
+        ssh "$@"
+    fi
+}
+
+fetch_remote_file() {
+    local remote_file="$1"
+    local local_file="$2"
+    remote_ssh_cmd "$REMOTE_USER@$REMOTE_HOST" "cat '$remote_file'" >"$local_file"
+}
+
 VM_NAME=${1:-""}
 NEW_VM_NAME=${2:-$VM_NAME}
 
@@ -37,24 +51,49 @@ if [ -z "$VM_NAME" ]; then
 fi
 
 VM_DIR="$LOCAL_BACKUP_PATH/$VM_NAME"
-if [ ! -d "$VM_DIR" ]; then
-    log "ERROR: No backups found for $VM_NAME at $VM_DIR"
-    exit 1
-fi
-
-LATEST_BACKUP=$(find "$VM_DIR" -mindepth 1 -maxdepth 1 -type d -name 'full-*' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
-if [ -z "$LATEST_BACKUP" ]; then
-    log "No backup directories found in $VM_DIR"
-    exit 1
-fi
-
-MANIFEST="$LATEST_BACKUP/metadata/disks.manifest"
-XML_SOURCE="$LATEST_BACKUP/metadata/domain.xml"
 TMP_XML=$(mktemp)
+MANIFEST=$(mktemp)
+XML_SOURCE=$(mktemp)
 
-if [ ! -f "$MANIFEST" ] || [ ! -f "$XML_SOURCE" ]; then
-    log "Backup metadata missing in $LATEST_BACKUP"
+if [ -n "$REMOTE_HOST" ]; then
+    LATEST_BACKUP=$(remote_ssh_cmd "$REMOTE_USER@$REMOTE_HOST" "find '$REMOTE_BACKUP_PATH/$VM_NAME' -mindepth 1 -maxdepth 1 -type d -name 'full-*' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-")
+else
+    if [ ! -d "$VM_DIR" ]; then
+        log "ERROR: No backups found for $VM_NAME at $VM_DIR"
+        rm -f "$TMP_XML" "$MANIFEST" "$XML_SOURCE"
+        exit 1
+    fi
+    LATEST_BACKUP=$(find "$VM_DIR" -mindepth 1 -maxdepth 1 -type d -name 'full-*' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
+fi
+
+if [ -z "$LATEST_BACKUP" ]; then
+    log "No backup directories found for $VM_NAME"
+    rm -f "$TMP_XML" "$MANIFEST" "$XML_SOURCE"
     exit 1
+fi
+
+if [ -n "$REMOTE_HOST" ]; then
+    fetch_remote_file "$LATEST_BACKUP/metadata/disks.manifest" "$MANIFEST" || {
+        log "Unable to fetch remote disk manifest"
+        rm -f "$TMP_XML" "$MANIFEST" "$XML_SOURCE"
+        exit 1
+    }
+    fetch_remote_file "$LATEST_BACKUP/metadata/domain.xml" "$XML_SOURCE" || {
+        log "Unable to fetch remote domain XML"
+        rm -f "$TMP_XML" "$MANIFEST" "$XML_SOURCE"
+        exit 1
+    }
+else
+    cp "$LATEST_BACKUP/metadata/disks.manifest" "$MANIFEST" || {
+        log "Unable to read disk manifest"
+        rm -f "$TMP_XML" "$MANIFEST" "$XML_SOURCE"
+        exit 1
+    }
+    cp "$LATEST_BACKUP/metadata/domain.xml" "$XML_SOURCE" || {
+        log "Unable to read domain XML"
+        rm -f "$TMP_XML" "$MANIFEST" "$XML_SOURCE"
+        exit 1
+    }
 fi
 
 log "Restoring from $LATEST_BACKUP to VM $NEW_VM_NAME"
@@ -65,19 +104,19 @@ if virsh -c "$LIBVIRT_DEFAULT_URI" dominfo "$NEW_VM_NAME" >/dev/null 2>&1; then
         if virsh -c "$LIBVIRT_DEFAULT_URI" domstate "$NEW_VM_NAME" 2>/dev/null | grep -qi running; then
             virsh -c "$LIBVIRT_DEFAULT_URI" destroy "$NEW_VM_NAME" >>"$RESTORE_LOGFILE" 2>&1 || {
                 log "Failed to stop existing VM $NEW_VM_NAME"
-                rm -f "$TMP_XML"
+                rm -f "$TMP_XML" "$MANIFEST" "$XML_SOURCE"
                 exit 1
             }
         fi
 
         virsh -c "$LIBVIRT_DEFAULT_URI" undefine "$NEW_VM_NAME" >>"$RESTORE_LOGFILE" 2>&1 || {
             log "Failed to undefine existing VM $NEW_VM_NAME"
-            rm -f "$TMP_XML"
+            rm -f "$TMP_XML" "$MANIFEST" "$XML_SOURCE"
             exit 1
         }
     else
         log "Aborted restore"
-        rm -f "$TMP_XML"
+        rm -f "$TMP_XML" "$MANIFEST" "$XML_SOURCE"
         exit 1
     fi
 fi
@@ -88,28 +127,39 @@ OLD_VM_NAME=$(sed -n 's:.*<name>\(.*\)</name>.*:\1:p' "$XML_SOURCE" | head -1)
 OLD_VM_NAME_ESCAPED=$(escape_sed "$OLD_VM_NAME")
 NEW_VM_NAME_ESCAPED=$(escape_sed "$NEW_VM_NAME")
 
-sed -i.bak "0,/<name>${OLD_VM_NAME_ESCAPED//\//\\/}<\/name>/s//<name>${NEW_VM_NAME_ESCAPED//\//\\/}<\/name>/" "$TMP_XML"
+sed -i.bak "0,/<name>${OLD_VM_NAME_ESCAPED}<\/name>/s//<name>${NEW_VM_NAME_ESCAPED}<\/name>/" "$TMP_XML"
 sed -i.bak '/<uuid>/d' "$TMP_XML"
 sed -i.bak "/<mac address=/d" "$TMP_XML"
 rm -f "$TMP_XML.bak"
 
 while IFS='|' read -r target source_path overlay_path backup_name; do
-    [ -n "$target" ] || continue
-
+    local_source="$source_path"
     source_basename=$(basename "$source_path")
     extension="${source_basename##*.}"
+
+    [ -n "$target" ] || continue
+
     if [ "$NEW_VM_NAME" = "$VM_NAME" ]; then
-        dest_path="$source_path"
+        dest_path="$local_source"
     else
         dest_path="$RESTORE_IMAGE_DIR/${NEW_VM_NAME}-${target}.${extension}"
     fi
 
     mkdir -p "$(dirname "$dest_path")"
-    rsync -a --sparse "$LATEST_BACKUP/disks/$backup_name" "$dest_path" >>"$RESTORE_LOGFILE" 2>&1 || {
-        log "Failed to restore disk $target to $dest_path"
-        rm -f "$TMP_XML"
-        exit 1
-    }
+
+    if [ -n "$REMOTE_HOST" ]; then
+        if ! remote_ssh_cmd "$REMOTE_USER@$REMOTE_HOST" "cat '$LATEST_BACKUP/disks/$backup_name'" | zstd -d -q -o "$dest_path" -f; then
+            log "Failed to restore disk $target to $dest_path"
+            rm -f "$TMP_XML" "$MANIFEST" "$XML_SOURCE"
+            exit 1
+        fi
+    else
+        if ! zstd -d -q -f -o "$dest_path" "$LATEST_BACKUP/disks/$backup_name"; then
+            log "Failed to restore disk $target to $dest_path"
+            rm -f "$TMP_XML" "$MANIFEST" "$XML_SOURCE"
+            exit 1
+        fi
+    fi
 
     src_escaped=$(escape_sed "$source_path")
     dst_escaped=$(escape_sed "$dest_path")
@@ -119,11 +169,11 @@ done <"$MANIFEST"
 
 if ! virsh -c "$LIBVIRT_DEFAULT_URI" define "$TMP_XML" >>"$RESTORE_LOGFILE" 2>&1; then
     log "Restore failed while defining $NEW_VM_NAME"
-    rm -f "$TMP_XML"
+    rm -f "$TMP_XML" "$MANIFEST" "$XML_SOURCE"
     exit 1
 fi
 
-rm -f "$TMP_XML"
+rm -f "$TMP_XML" "$MANIFEST" "$XML_SOURCE"
 
 if virsh -c "$LIBVIRT_DEFAULT_URI" start "$NEW_VM_NAME" >>"$RESTORE_LOGFILE" 2>&1; then
     log "Restore successful for $NEW_VM_NAME from $VM_NAME backups"

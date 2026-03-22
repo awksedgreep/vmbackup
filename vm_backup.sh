@@ -45,12 +45,12 @@ report_failure() {
     notify "$message"
 }
 
-copy_disk() {
-    local source_path="$1"
-    local dest_path="$2"
-
-    mkdir -p "$(dirname "$dest_path")"
-    rsync -a --sparse "$source_path" "$dest_path"
+remote_ssh_cmd() {
+    if [ -n "$RSYNC_SSH_KEY" ] && [ -f "$RSYNC_SSH_KEY" ]; then
+        ssh -i "$RSYNC_SSH_KEY" "$@"
+    else
+        ssh "$@"
+    fi
 }
 
 cleanup_snapshots() {
@@ -73,26 +73,53 @@ cleanup_snapshots() {
     return "$cleanup_failed"
 }
 
+stream_disk_to_remote() {
+    local source_path="$1"
+    local remote_file="$2"
+
+    zstd -T0 -q -c "$source_path" | remote_ssh_cmd "$REMOTE_USER@$REMOTE_HOST" "cat > '$remote_file'"
+}
+
+store_file() {
+    local source_file="$1"
+    local dest_file="$2"
+
+    if [ -n "$REMOTE_HOST" ]; then
+        remote_ssh_cmd "$REMOTE_USER@$REMOTE_HOST" "mkdir -p '$(dirname "$dest_file")'" >>"$LOGFILE" 2>&1 || return 1
+        cat "$source_file" | remote_ssh_cmd "$REMOTE_USER@$REMOTE_HOST" "cat > '$dest_file'"
+    else
+        mkdir -p "$(dirname "$dest_file")"
+        cp "$source_file" "$dest_file"
+    fi
+}
+
 backup_vm() {
     local vm="$1"
     local vm_dir="$LOCAL_BACKUP_PATH/$vm"
-    local timestamp backup_dir metadata_dir disks_dir manifest xml_file
-    local snapshot_name snapshot_attempted copy_failed=0 backup_failed=0
-    local -a diskspec_args snapshot_cmd rsync_cmd
+    local timestamp backup_dir metadata_dir manifest xml_file
+    local snapshot_name snapshot_attempted backup_failed=0
+    local -a diskspec_args snapshot_cmd
 
     timestamp=$(date +"%Y%m%d-%H%M%S")
     backup_dir="$vm_dir/full-$timestamp"
     metadata_dir="$backup_dir/metadata"
-    disks_dir="$backup_dir/disks"
-    manifest="$metadata_dir/disks.manifest"
-    xml_file="$metadata_dir/domain.xml"
+    manifest=$(mktemp)
+    xml_file=$(mktemp)
     snapshot_name="vmbackup-$timestamp"
 
-    mkdir -p "$metadata_dir" "$disks_dir"
+    if [ -n "$REMOTE_HOST" ]; then
+        if ! remote_ssh_cmd "$REMOTE_USER@$REMOTE_HOST" "mkdir -p '$metadata_dir' '$backup_dir/disks'" >>"$LOGFILE" 2>&1; then
+            report_failure "Remote mkdir fail $vm"
+            rm -f "$manifest" "$xml_file"
+            return 1
+        fi
+    else
+        mkdir -p "$metadata_dir" "$backup_dir/disks"
+    fi
 
     if ! virsh -c "$LIBVIRT_DEFAULT_URI" dumpxml "$vm" >"$xml_file"; then
         report_failure "Backup fail $vm: unable to dump domain XML"
-        rm -rf -- "$backup_dir"
+        rm -f "$manifest" "$xml_file"
         return 1
     fi
 
@@ -106,21 +133,21 @@ backup_vm() {
         [ -n "$source_path" ] || continue
 
         overlay_path="${source_path}.vmbackup-${timestamp}.${target}.overlay.qcow2"
-        backup_name="${target}__$(basename "$source_path")"
+        backup_name="${target}__$(basename "$source_path").zst"
         printf '%s|%s|%s|%s\n' "$target" "$source_path" "$overlay_path" "$backup_name" >>"$manifest"
         diskspec_args+=(--diskspec "$target,snapshot=external,file=$overlay_path")
     done < <(virsh -c "$LIBVIRT_DEFAULT_URI" domblklist --details "$vm" | awk 'NR>2 && NF >= 4 {print $1, $2, $3, $4}')
 
     if [ ! -s "$manifest" ]; then
         report_failure "Backup fail $vm: no file-backed disks found"
-        rm -rf -- "$backup_dir"
+        rm -f "$manifest" "$xml_file"
         return 1
     fi
 
     snapshot_cmd=(virsh -c "$LIBVIRT_DEFAULT_URI" snapshot-create-as "$vm" "$snapshot_name" --disk-only --atomic --no-metadata)
     snapshot_cmd+=("${diskspec_args[@]}")
 
-    log "Backup $vm (snapshot copy)"
+    log "Backup $vm (snapshot stream)"
     log "Snapshot CMD: ${snapshot_cmd[*]} --quiesce"
 
     if [ "${QUIESCE_WITH_GUEST_AGENT:-yes}" = "yes" ]; then
@@ -134,20 +161,30 @@ backup_vm() {
     if [ -z "$snapshot_attempted" ]; then
         if ! "${snapshot_cmd[@]}" >>"$LOGFILE" 2>&1; then
             report_failure "Backup fail $vm: snapshot creation failed"
-            rm -rf -- "$backup_dir"
+            rm -f "$manifest" "$xml_file"
             return 1
         fi
     fi
 
     while IFS='|' read -r target source_path overlay_path backup_name; do
-        [ -n "$target" ] || continue
+        local disk_dest="$backup_dir/disks/$backup_name"
 
-        log "Copying $vm disk $target from $source_path"
-        if ! copy_disk "$source_path" "$disks_dir/$backup_name" >>"$LOGFILE" 2>&1; then
-            log "Disk copy failed for $vm disk $target"
-            copy_failed=1
-            backup_failed=1
-            break
+        [ -n "$target" ] || continue
+        log "Streaming $vm disk $target from $source_path"
+
+        if [ -n "$REMOTE_HOST" ]; then
+            if ! stream_disk_to_remote "$source_path" "$disk_dest" >>"$LOGFILE" 2>&1; then
+                log "Disk stream failed for $vm disk $target"
+                backup_failed=1
+                break
+            fi
+        else
+            mkdir -p "$backup_dir/disks"
+            if ! zstd -T0 -q -f "$source_path" -o "$disk_dest" >>"$LOGFILE" 2>&1; then
+                log "Disk compression failed for $vm disk $target"
+                backup_failed=1
+                break
+            fi
         fi
     done <"$manifest"
 
@@ -155,35 +192,25 @@ backup_vm() {
         backup_failed=1
     fi
 
-    if [ "$copy_failed" -eq 1 ]; then
-        report_failure "Backup fail $vm: disk copy failed"
-        return 1
-    fi
-
     if [ "$backup_failed" -eq 1 ]; then
-        report_failure "Backup fail $vm: snapshot cleanup failed"
+        report_failure "Backup fail $vm"
+        rm -f "$manifest" "$xml_file"
         return 1
     fi
 
-    if [ -n "$REMOTE_HOST" ]; then
-        rsync_cmd=(rsync -avz)
-        ssh_cmd=(ssh)
-        if [ -n "$RSYNC_SSH_KEY" ] && [ -f "$RSYNC_SSH_KEY" ]; then
-            rsync_cmd+=(-e "ssh -i $RSYNC_SSH_KEY")
-            ssh_cmd+=(-i "$RSYNC_SSH_KEY")
-        fi
-
-        if ! "${ssh_cmd[@]}" "$REMOTE_USER@$REMOTE_HOST" "mkdir -p '$REMOTE_BACKUP_PATH/$vm'" >>"$LOGFILE" 2>&1; then
-            report_failure "Remote mkdir fail $vm"
-            return 1
-        fi
-
-        if ! "${rsync_cmd[@]}" "$backup_dir/" "$REMOTE_USER@$REMOTE_HOST:$REMOTE_BACKUP_PATH/$vm/$(basename "$backup_dir")/"; then
-            report_failure "Rsync fail $vm"
-            return 1
-        fi
+    if ! store_file "$xml_file" "$metadata_dir/domain.xml" >>"$LOGFILE" 2>&1; then
+        report_failure "Backup fail $vm: unable to store domain XML"
+        rm -f "$manifest" "$xml_file"
+        return 1
     fi
 
+    if ! store_file "$manifest" "$metadata_dir/disks.manifest" >>"$LOGFILE" 2>&1; then
+        report_failure "Backup fail $vm: unable to store disk manifest"
+        rm -f "$manifest" "$xml_file"
+        return 1
+    fi
+
+    rm -f "$manifest" "$xml_file"
     log "$vm OK"
     return 0
 }
@@ -194,7 +221,7 @@ trap 'flock -u 200' EXIT
 
 mkdir -p "$LOCAL_BACKUP_PATH"
 
-log "Starting snapshot-copy backup"
+log "Starting snapshot-stream backup"
 
 VMLIST=$(virsh -c "$LIBVIRT_DEFAULT_URI" list --state-running | awk 'NR>2 && $1 ~ /^[0-9]+$/ {print $2}')
 [ -z "$VMLIST" ] && { log "No running VMs"; exit 0; }
