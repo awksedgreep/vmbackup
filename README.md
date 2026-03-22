@@ -27,6 +27,7 @@ This avoids QEMU NBD socket handling and avoids large local staging copies when 
 ## Scripts
 
 - `setup.sh`: interactive setup for `config.sh`, log files, and cron
+- `test_notifications.sh`: sends ntfy and email test notifications using the same alert format as the backup script
 - `vm_backup.sh`: snapshot-stream backup runner
 - `vm_restore.sh`: restore the newest `full-*` backup for a VM from remote or local compressed backups
 - `vm_retention.sh`: prune old `full-*` backup directories
