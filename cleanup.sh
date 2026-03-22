@@ -17,7 +17,7 @@ fi
 echo "Cleaning up vmbackup setup from $SCRIPT_DIR"
 
 if [ "${FORCE:-0}" != "1" ]; then
-    read -r -p "Remove cron, logs, temp dir, and local backups? (y/N): " REPLY
+    read -r -p "Remove cron, logs, and local backups? (y/N): " REPLY
     if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
         echo "Aborted."
         exit 1
@@ -32,9 +32,6 @@ if [ -n "$LOCAL_BACKUP_PATH" ]; then
 fi
 
 rm -f -- "${LOGFILE:-/var/log/vm_backup.log}" "${RESTORE_LOGFILE:-/var/log/vm_restore.log}" "${RETENTION_LOGFILE:-/var/log/vm_retention.log}"
-
-if [ -n "$LIBVIRT_TMPDIR" ]; then
-    rm -rf -- "$LIBVIRT_TMPDIR"
-fi
+rm -rf -- "${LEGACY_TEMP_DIR:-/var/lib/libvirt/backup}" "${LEGACY_QEMU_TEMP_DIR:-/var/lib/libvirt/qemu/backup}"
 
 echo "Cleanup complete. Repo checkout at $SCRIPT_DIR was left in place."

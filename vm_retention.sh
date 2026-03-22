@@ -37,10 +37,7 @@ delete_matching_backups() {
     done < <(find "$LOCAL_BACKUP_PATH" -mindepth 2 -maxdepth 2 -type d -name "$pattern" -mtime +"$days" -print)
 }
 
-delete_matching_backups "inc*" "${INCREMENTAL_RETENTION_DAYS:-7}"
-inc_deleted="$DELETE_COUNT"
-
-delete_matching_backups "full*" "${FULL_RETENTION_DAYS:-28}"
+delete_matching_backups "full-*" "${FULL_RETENTION_DAYS:-14}"
 full_deleted="$DELETE_COUNT"
 
-log "Retention cleanup complete (inc=$inc_deleted full=$full_deleted)"
+log "Retention cleanup complete (full=$full_deleted)"
