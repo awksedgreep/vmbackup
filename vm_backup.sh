@@ -167,8 +167,15 @@ backup_vm() {
 
     if [ -n "$REMOTE_HOST" ]; then
         rsync_cmd=(rsync -avz)
+        ssh_cmd=(ssh)
         if [ -n "$RSYNC_SSH_KEY" ] && [ -f "$RSYNC_SSH_KEY" ]; then
             rsync_cmd+=(-e "ssh -i $RSYNC_SSH_KEY")
+            ssh_cmd+=(-i "$RSYNC_SSH_KEY")
+        fi
+
+        if ! "${ssh_cmd[@]}" "$REMOTE_USER@$REMOTE_HOST" "mkdir -p '$REMOTE_BACKUP_PATH/$vm'" >>"$LOGFILE" 2>&1; then
+            report_failure "Remote mkdir fail $vm"
+            return 1
         fi
 
         if ! "${rsync_cmd[@]}" "$backup_dir/" "$REMOTE_USER@$REMOTE_HOST:$REMOTE_BACKUP_PATH/$vm/$(basename "$backup_dir")/"; then
