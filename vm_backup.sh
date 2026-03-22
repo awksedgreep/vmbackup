@@ -14,6 +14,7 @@ fi
 . "$CONFIG_FILE"
 
 export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
+HYPERVISOR_HOSTNAME=$(hostname -s 2>/dev/null || hostname)
 
 if [ "$EUID" -ne 0 ]; then
     echo "Run as root"
@@ -26,7 +27,7 @@ log() {
 
 ntfy() {
     [ -n "$NTFY_URL" ] || return 0
-    curl -fsS -H "Title: VM Backup Alert" -d "$1" "$NTFY_URL" >/dev/null || true
+    curl -fsS -H "Title: VM Backup Alert ($HYPERVISOR_HOSTNAME)" -d "$1" "$NTFY_URL" >/dev/null || true
 }
 
 notify() {
@@ -35,7 +36,7 @@ notify() {
     [ -n "$ALERT_EMAIL_TO" ] || return 0
     curl -fsS -H "Authorization: Bearer $RESEND_API_KEY" \
         -H "Content-Type: application/json" \
-        -d "{\"from\":\"$ALERT_EMAIL_FROM\",\"to\":[\"$ALERT_EMAIL_TO\"],\"subject\":\"VM Backup\",\"text\":\"$1\"}" \
+        -d "{\"from\":\"$ALERT_EMAIL_FROM\",\"to\":[\"$ALERT_EMAIL_TO\"],\"subject\":\"VM Backup [$HYPERVISOR_HOSTNAME]\",\"text\":\"$1\"}" \
         https://api.resend.com/emails >/dev/null || true
 }
 
