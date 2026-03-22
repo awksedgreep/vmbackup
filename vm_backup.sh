@@ -73,6 +73,33 @@ cleanup_snapshots() {
     return "$cleanup_failed"
 }
 
+ensure_base_disks() {
+    local vm="$1"
+    local normalized=0
+    local line type device target source_path
+
+    while read -r type device target source_path; do
+        [ "$type" = "file" ] || continue
+        [ "$device" = "disk" ] || continue
+        [ -n "$target" ] || continue
+
+        if [[ "$source_path" == *".vmbackup-"*".overlay.qcow2" ]]; then
+            log "Detected leftover overlay for $vm disk $target at $source_path"
+            if ! virsh -c "$LIBVIRT_DEFAULT_URI" blockcommit "$vm" "$target" --active --pivot --verbose >>"$LOGFILE" 2>&1; then
+                report_failure "Backup fail $vm: unable to pivot leftover overlay on $target"
+                return 1
+            fi
+            normalized=1
+        fi
+    done < <(virsh -c "$LIBVIRT_DEFAULT_URI" domblklist --details "$vm" | awk 'NR>2 && NF >= 4 {print $1, $2, $3, $4}')
+
+    if [ "$normalized" -eq 1 ]; then
+        log "Normalized active disks for $vm before backup"
+    fi
+
+    return 0
+}
+
 stream_disk_to_remote() {
     local source_path="$1"
     local remote_file="$2"
@@ -110,6 +137,11 @@ backup_vm() {
     manifest=$(mktemp)
     xml_file=$(mktemp)
     snapshot_name="vmbackup-$timestamp"
+
+    if ! ensure_base_disks "$vm"; then
+        rm -f "$manifest" "$xml_file"
+        return 1
+    fi
 
     if [ -n "$REMOTE_HOST" ]; then
         metadata_xml_dest="$remote_metadata_dir/domain.xml"
