@@ -96,19 +96,25 @@ store_file() {
 backup_vm() {
     local vm="$1"
     local vm_dir="$LOCAL_BACKUP_PATH/$vm"
-    local timestamp backup_dir metadata_dir manifest xml_file
+    local timestamp backup_dir remote_backup_dir metadata_dir remote_metadata_dir metadata_xml_dest metadata_manifest_dest manifest xml_file
     local snapshot_name snapshot_attempted backup_failed=0
     local -a diskspec_args snapshot_cmd
 
     timestamp=$(date +"%Y%m%d-%H%M%S")
     backup_dir="$vm_dir/full-$timestamp"
+    remote_backup_dir="$REMOTE_BACKUP_PATH/$vm/full-$timestamp"
     metadata_dir="$backup_dir/metadata"
+    remote_metadata_dir="$remote_backup_dir/metadata"
+    metadata_xml_dest="$metadata_dir/domain.xml"
+    metadata_manifest_dest="$metadata_dir/disks.manifest"
     manifest=$(mktemp)
     xml_file=$(mktemp)
     snapshot_name="vmbackup-$timestamp"
 
     if [ -n "$REMOTE_HOST" ]; then
-        if ! remote_ssh_cmd "$REMOTE_USER@$REMOTE_HOST" "mkdir -p '$metadata_dir' '$backup_dir/disks'" >>"$LOGFILE" 2>&1; then
+        metadata_xml_dest="$remote_metadata_dir/domain.xml"
+        metadata_manifest_dest="$remote_metadata_dir/disks.manifest"
+        if ! remote_ssh_cmd "$REMOTE_USER@$REMOTE_HOST" "mkdir -p '$remote_metadata_dir' '$remote_backup_dir/disks'" >>"$LOGFILE" 2>&1; then
             report_failure "Remote mkdir fail $vm"
             rm -f "$manifest" "$xml_file"
             return 1
@@ -168,12 +174,13 @@ backup_vm() {
 
     while IFS='|' read -r target source_path overlay_path backup_name; do
         local disk_dest="$backup_dir/disks/$backup_name"
+        local remote_disk_dest="$remote_backup_dir/disks/$backup_name"
 
         [ -n "$target" ] || continue
         log "Streaming $vm disk $target from $source_path"
 
         if [ -n "$REMOTE_HOST" ]; then
-            if ! stream_disk_to_remote "$source_path" "$disk_dest" >>"$LOGFILE" 2>&1; then
+            if ! stream_disk_to_remote "$source_path" "$remote_disk_dest" >>"$LOGFILE" 2>&1; then
                 log "Disk stream failed for $vm disk $target"
                 backup_failed=1
                 break
@@ -198,13 +205,13 @@ backup_vm() {
         return 1
     fi
 
-    if ! store_file "$xml_file" "$metadata_dir/domain.xml" >>"$LOGFILE" 2>&1; then
+    if ! store_file "$xml_file" "$metadata_xml_dest" >>"$LOGFILE" 2>&1; then
         report_failure "Backup fail $vm: unable to store domain XML"
         rm -f "$manifest" "$xml_file"
         return 1
     fi
 
-    if ! store_file "$manifest" "$metadata_dir/disks.manifest" >>"$LOGFILE" 2>&1; then
+    if ! store_file "$manifest" "$metadata_manifest_dest" >>"$LOGFILE" 2>&1; then
         report_failure "Backup fail $vm: unable to store disk manifest"
         rm -f "$manifest" "$xml_file"
         return 1
