@@ -77,7 +77,7 @@ cleanup_snapshots() {
 ensure_base_disks() {
     local vm="$1"
     local normalized=0
-    local line type device target source_path
+    local line type device target source_path blockjob_info
 
     while read -r type device target source_path; do
         [ "$type" = "file" ] || continue
@@ -86,10 +86,21 @@ ensure_base_disks() {
 
         if [[ "$source_path" == *".vmbackup-"*".overlay.qcow2" ]]; then
             log "Detected leftover overlay for $vm disk $target at $source_path"
-            if ! virsh -c "$LIBVIRT_DEFAULT_URI" blockcommit "$vm" "$target" --active --pivot --verbose >>"$LOGFILE" 2>&1; then
-                report_failure "Backup fail $vm: unable to pivot leftover overlay on $target"
-                return 1
+
+            blockjob_info=$(virsh -c "$LIBVIRT_DEFAULT_URI" blockjob "$vm" "$target" --info 2>&1 || true)
+            if printf '%s\n' "$blockjob_info" | grep -q "Active Block"; then
+                log "Active block job detected for $vm disk $target, attempting pivot"
+                if ! virsh -c "$LIBVIRT_DEFAULT_URI" blockjob "$vm" "$target" --pivot >>"$LOGFILE" 2>&1; then
+                    report_failure "Backup fail $vm: unable to complete active block job on $target"
+                    return 1
+                fi
+            else
+                if ! virsh -c "$LIBVIRT_DEFAULT_URI" blockcommit "$vm" "$target" --active --pivot --verbose >>"$LOGFILE" 2>&1; then
+                    report_failure "Backup fail $vm: unable to pivot leftover overlay on $target"
+                    return 1
+                fi
             fi
+
             normalized=1
         fi
     done < <(virsh -c "$LIBVIRT_DEFAULT_URI" domblklist --details "$vm" | awk 'NR>2 && NF >= 4 {print $1, $2, $3, $4}')
