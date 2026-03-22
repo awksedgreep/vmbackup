@@ -25,6 +25,27 @@ log() {
     echo "[$(date +"%Y-%m-%d %H:%M:%S")] $1" | tee -a "$LOGFILE"
 }
 
+build_email_to_json() {
+    printf '%s' "$ALERT_EMAIL_TO" | awk -F',' '
+        BEGIN { printf "[" }
+        {
+            first = 1
+            for (i = 1; i <= NF; i++) {
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
+                if ($i == "") {
+                    continue
+                }
+                if (!first) {
+                    printf ","
+                }
+                printf "\"%s\"", $i
+                first = 0
+            }
+        }
+        END { printf "]" }
+    '
+}
+
 ntfy() {
     [ -n "$NTFY_URL" ] || return 0
     curl -fsS -H "Title: VM Backup Alert ($HYPERVISOR_HOSTNAME)" -d "$1" "$NTFY_URL" >/dev/null || true
@@ -34,9 +55,12 @@ notify() {
     [ -n "$RESEND_API_KEY" ] || return 0
     [ -n "$ALERT_EMAIL_FROM" ] || return 0
     [ -n "$ALERT_EMAIL_TO" ] || return 0
+    local to_json
+    to_json=$(build_email_to_json)
+    [ "$to_json" != "[]" ] || return 0
     curl -fsS -H "Authorization: Bearer $RESEND_API_KEY" \
         -H "Content-Type: application/json" \
-        -d "{\"from\":\"$ALERT_EMAIL_FROM\",\"to\":[\"$ALERT_EMAIL_TO\"],\"subject\":\"VM Backup [$HYPERVISOR_HOSTNAME]\",\"text\":\"$1\"}" \
+        -d "{\"from\":\"$ALERT_EMAIL_FROM\",\"to\":$to_json,\"subject\":\"VM Backup [$HYPERVISOR_HOSTNAME]\",\"text\":\"$1\"}" \
         https://api.resend.com/emails >/dev/null || true
 }
 

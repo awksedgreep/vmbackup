@@ -16,6 +16,27 @@ fi
 HYPERVISOR_HOSTNAME=$(hostname -s 2>/dev/null || hostname)
 MESSAGE=${1:-"vmbackup notification test from $HYPERVISOR_HOSTNAME"}
 
+build_email_to_json() {
+    printf '%s' "$ALERT_EMAIL_TO" | awk -F',' '
+        BEGIN { printf "[" }
+        {
+            first = 1
+            for (i = 1; i <= NF; i++) {
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
+                if ($i == "") {
+                    continue
+                }
+                if (!first) {
+                    printf ","
+                }
+                printf "\"%s\"", $i
+                first = 0
+            }
+        }
+        END { printf "]" }
+    '
+}
+
 ntfy() {
     [ -n "$NTFY_URL" ] || { echo "NTFY_URL is not configured"; return 1; }
     curl -fsS -H "Title: VM Backup Alert ($HYPERVISOR_HOSTNAME)" -d "$1" "$NTFY_URL"
@@ -25,9 +46,12 @@ notify() {
     [ -n "$RESEND_API_KEY" ] || { echo "RESEND_API_KEY is not configured"; return 1; }
     [ -n "$ALERT_EMAIL_FROM" ] || { echo "ALERT_EMAIL_FROM is not configured"; return 1; }
     [ -n "$ALERT_EMAIL_TO" ] || { echo "ALERT_EMAIL_TO is not configured"; return 1; }
+    local to_json
+    to_json=$(build_email_to_json)
+    [ "$to_json" != "[]" ] || { echo "ALERT_EMAIL_TO does not contain any usable addresses"; return 1; }
     curl -fsS -H "Authorization: Bearer $RESEND_API_KEY" \
         -H "Content-Type: application/json" \
-        -d "{\"from\":\"$ALERT_EMAIL_FROM\",\"to\":[\"$ALERT_EMAIL_TO\"],\"subject\":\"VM Backup [$HYPERVISOR_HOSTNAME]\",\"text\":\"$1\"}" \
+        -d "{\"from\":\"$ALERT_EMAIL_FROM\",\"to\":$to_json,\"subject\":\"VM Backup [$HYPERVISOR_HOSTNAME]\",\"text\":\"$1\"}" \
         https://api.resend.com/emails
 }
 
