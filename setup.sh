@@ -56,7 +56,7 @@ echo "Repo path: $SCRIPT_DIR"
 prompt LOCAL_BACKUP_PATH "Local backup path" "/local/vm_backups"
 prompt RESTORE_IMAGE_DIR "Restore image directory" "/var/lib/libvirt/images"
 prompt LIBVIRT_DEFAULT_URI "Libvirt URI" "qemu:///system"
-prompt REMOTE_HOST "Remote backup host (blank disables rsync)" ""
+prompt REMOTE_HOST "Remote backup host (blank stores local .zst backups)" ""
 prompt REMOTE_USER "Remote backup user" "root"
 prompt REMOTE_BACKUP_PATH "Remote backup path" "/vm_backups"
 prompt RSYNC_SSH_KEY "SSH key for rsync" "/root/.ssh/id_rsa_backup"
@@ -111,4 +111,9 @@ else
 fi
 
 echo "Wrote config: $CONFIG_FILE"
+if [ -n "$REMOTE_HOST" ]; then
+    echo "Backup mode: remote zstd stream to $REMOTE_USER@$REMOTE_HOST:$REMOTE_BACKUP_PATH"
+else
+    echo "Backup mode: local zstd-compressed full backups under $LOCAL_BACKUP_PATH"
+fi
 echo "Setup complete. Future updates should only require git pull in $SCRIPT_DIR."
