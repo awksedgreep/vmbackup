@@ -65,6 +65,7 @@ PERL
 }
 
 NO_LINK=0
+NO_START=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -72,13 +73,17 @@ while [ $# -gt 0 ]; do
             NO_LINK=1
             shift
             ;;
+        --nostart)
+            NO_START=1
+            shift
+            ;;
         --help|-h)
-            echo "Usage: $0 [--nolink] <VM_NAME> [NEW_VM_NAME]"
+            echo "Usage: $0 [--nolink] [--nostart] <VM_NAME> [NEW_VM_NAME]"
             exit 0
             ;;
         --*)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--nolink] <VM_NAME> [NEW_VM_NAME]"
+            echo "Usage: $0 [--nolink] [--nostart] <VM_NAME> [NEW_VM_NAME]"
             exit 1
             ;;
         *)
@@ -91,7 +96,7 @@ VM_NAME=${1:-""}
 NEW_VM_NAME=${2:-$VM_NAME}
 
 if [ -z "$VM_NAME" ]; then
-    echo "Usage: $0 [--nolink] <VM_NAME> [NEW_VM_NAME]"
+    echo "Usage: $0 [--nolink] [--nostart] <VM_NAME> [NEW_VM_NAME]"
     exit 1
 fi
 
@@ -227,6 +232,11 @@ if ! virsh -c "$LIBVIRT_DEFAULT_URI" define "$TMP_XML" >>"$RESTORE_LOGFILE" 2>&1
 fi
 
 rm -f "$TMP_XML" "$MANIFEST" "$XML_SOURCE"
+
+if [ "$NO_START" -eq 1 ]; then
+    log "Restore defined $NEW_VM_NAME from $VM_NAME backups without starting it"
+    exit 0
+fi
 
 if virsh -c "$LIBVIRT_DEFAULT_URI" start "$NEW_VM_NAME" >>"$RESTORE_LOGFILE" 2>&1; then
     log "Restore successful for $NEW_VM_NAME from $VM_NAME backups"
