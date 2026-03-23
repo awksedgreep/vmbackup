@@ -42,6 +42,28 @@ fetch_remote_file() {
     remote_ssh_cmd "$REMOTE_USER@$REMOTE_HOST" "cat '$remote_file'" >"$local_file"
 }
 
+set_interfaces_link_down() {
+    local xml_file="$1"
+    local perl_script
+
+    perl_script=$(mktemp)
+    cat >"$perl_script" <<'PERL'
+s{<interface\b.*?</interface>}{
+    my $block = $&;
+    $block =~ s{<link\s+state=(["']).*?\1\s*/>}{<link state="down"/>}g;
+    if ($block !~ /<link\s+state=/) {
+        $block =~ s{(<source\b[^>]*/>)}{$1\n      <link state="down"/>};
+    }
+    $block;
+}gse;
+PERL
+
+    perl -0pi "$perl_script" "$xml_file"
+    local status=$?
+    rm -f "$perl_script"
+    return "$status"
+}
+
 NO_LINK=0
 
 while [ $# -gt 0 ]; do
@@ -154,7 +176,11 @@ sed -i.bak "0,/<name>${OLD_VM_NAME_ESCAPED}<\/name>/s//<name>${NEW_VM_NAME_ESCAP
 sed -i.bak '/<uuid>/d' "$TMP_XML"
 sed -i.bak "/<mac address=/d" "$TMP_XML"
 if [ "$NO_LINK" -eq 1 ]; then
-    perl -0pi -e "s#<interface\\b(.*?)</interface>#my \$block = \$&; \$block =~ s#<link\\s+state=(['\"])up\\1\\s*/>#<link state='down'/>#g; if (\$block !~ /<link\\s+state=/) { \$block =~ s#(<source\\b[^>]*/>)#\$1\\n      <link state='down'/>#; } \$block#gse" "$TMP_XML"
+    if ! set_interfaces_link_down "$TMP_XML"; then
+        log "Failed to mark restored interfaces link-down"
+        rm -f "$TMP_XML" "$MANIFEST" "$XML_SOURCE"
+        exit 1
+    fi
     log "Interfaces will be restored with link state down"
 fi
 rm -f "$TMP_XML.bak"
